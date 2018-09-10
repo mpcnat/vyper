@@ -1,10 +1,23 @@
 import ast
 
-from vyper.types import get_size_of_type, canonicalize_type, parse_type, \
+from vyper.types import (
+    get_size_of_type,
+    canonicalize_type,
+    parse_type,
     ByteArrayType
-from vyper.utils import sha3, is_varname_valid, bytes_to_int, ceil32
-from vyper.function_signature import VariableRecord
-from vyper.exceptions import InvalidTypeException, VariableDeclarationException
+)
+from vyper.utils import (
+    sha3,
+    is_varname_valid,
+    bytes_to_int,
+    ceil32
+)
+from vyper.signatures.function_signature import VariableRecord
+from vyper.exceptions import (
+    InvalidTypeException,
+    VariableDeclarationException,
+    EventDeclarationException
+)
 
 
 # Event signature object
@@ -18,9 +31,12 @@ class EventSignature():
 
     # Get a signature from an event declaration
     @classmethod
-    def from_declaration(cls, code):
+    def from_declaration(cls, code, custom_units=None):
         name = code.target.id
         pos = 0
+
+        if not is_varname_valid(name, custom_units=custom_units):
+            raise EventDeclarationException("Event name invalid: " + name)
         # Determine the arguments, expects something of the form def foo(arg1: num, arg2: num ...
         args = []
         indexed_list = []
@@ -41,18 +57,18 @@ class EventSignature():
                 else:
                     indexed_list.append(False)
                 if isinstance(typ, ast.Subscript) and getattr(typ.value, 'id', None) == 'bytes' and typ.slice.value.n > 32 and is_indexed:
-                    raise VariableDeclarationException("Indexed arguments are limited to 32 bytes")
+                    raise EventDeclarationException("Indexed arguments are limited to 32 bytes")
                 if topics_count > 4:
-                    raise VariableDeclarationException("Maximum of 3 topics {} given".format(topics_count - 1), arg)
+                    raise EventDeclarationException("Maximum of 3 topics {} given".format(topics_count - 1), arg)
                 if not isinstance(arg, str):
                     raise VariableDeclarationException("Argument name invalid", arg)
                 if not typ:
                     raise InvalidTypeException("Argument must have type", arg)
-                if not is_varname_valid(arg):
+                if not is_varname_valid(arg, custom_units):
                     raise VariableDeclarationException("Argument name invalid or reserved: " + arg, arg)
                 if arg in (x.name for x in args):
                     raise VariableDeclarationException("Duplicate function argument name: " + arg, arg)
-                parsed_type = parse_type(typ, None)
+                parsed_type = parse_type(typ, None, custom_units=custom_units)
                 args.append(VariableRecord(arg, pos, parsed_type, False))
                 if isinstance(parsed_type, ByteArrayType):
                     pos += ceil32(typ.slice.value.n)

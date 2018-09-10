@@ -27,11 +27,14 @@ def is_symbol(i):
     return isinstance(i, str) and i[:5] == '_sym_'
 
 
-def get_revert():
+def get_revert(mem_start=None, mem_len=None):
     o = []
     end_symbol = mksymbol()
     o.extend([end_symbol, 'JUMPI'])
-    o.extend(['PUSH1', 0, 'DUP1', 'REVERT'])
+    if (mem_start, mem_len) == (None, None):
+        o.extend(['PUSH1', 0, 'DUP1', 'REVERT'])
+    else:
+        o.extend([mem_len, mem_start, 'REVERT'])
     o.extend([end_symbol, 'JUMPDEST'])
     return o
 
@@ -170,6 +173,12 @@ def compile_to_assembly(code, withargs=None, break_dest=None, height=0):
         o = compile_to_assembly(code.args[0], withargs, break_dest, height)
         o.extend(get_revert())
         return o
+    elif code.value == 'assert_reason':
+        o = compile_to_assembly(code.args[0], withargs, break_dest, height)
+        mem_start = compile_to_assembly(code.args[1], withargs, break_dest, height)
+        mem_len = compile_to_assembly(code.args[2], withargs, break_dest, height)
+        o.extend(get_revert(mem_start, mem_len))
+        return o
     # Unsigned/signed clamp, check less-than
     elif code.value in ('uclamplt', 'uclample', 'clamplt', 'clample', 'uclampgt', 'uclampge', 'clampgt', 'clampge'):
         if isinstance(code.args[0].value, int) and isinstance(code.args[1].value, int):
@@ -211,7 +220,8 @@ def compile_to_assembly(code, withargs=None, break_dest=None, height=0):
         o.extend(compile_to_assembly(code.args[1], withargs, break_dest, height + 1))
         o.extend(['DUP1'])
         o.extend(compile_to_assembly(code.args[2], withargs, break_dest, height + 3))
-        o.extend(['SWAP1', comp1, 'PC', 'JUMPI'])
+        o.extend(['SWAP1', comp1, 'ISZERO'])
+        o.extend(get_revert())
         o.extend(['DUP1', 'SWAP2', 'SWAP1', comp2, 'ISZERO'])
         o.extend(get_revert())
         return o
@@ -224,7 +234,27 @@ def compile_to_assembly(code, withargs=None, break_dest=None, height=0):
     # SHA3 a single value
     elif code.value == 'sha3_32':
         o = compile_to_assembly(code.args[0], withargs, break_dest, height)
-        o.extend(['PUSH1', MemoryPositions.FREE_VAR_SPACE, 'MSTORE', 'PUSH1', 32, 'PUSH1', MemoryPositions.FREE_VAR_SPACE, 'SHA3'])
+        o.extend([
+            'PUSH1', MemoryPositions.FREE_VAR_SPACE,
+            'MSTORE',
+            'PUSH1', 32,
+            'PUSH1', MemoryPositions.FREE_VAR_SPACE,
+            'SHA3'
+        ])
+        return o
+    # SHA3 a 64 byte value
+    elif code.value == 'sha3_64':
+        o = compile_to_assembly(code.args[0], withargs, break_dest, height)
+        o.extend(compile_to_assembly(code.args[1], withargs, break_dest, height))
+        o.extend([
+            'PUSH1', MemoryPositions.FREE_VAR_SPACE2,
+            'MSTORE',
+            'PUSH1', MemoryPositions.FREE_VAR_SPACE,
+            'MSTORE',
+            'PUSH1', 64,
+            'PUSH1', MemoryPositions.FREE_VAR_SPACE,
+            'SHA3'
+        ])
         return o
     # <= operator
     elif code.value == 'le':
@@ -246,6 +276,23 @@ def compile_to_assembly(code, withargs=None, break_dest=None, height=0):
         return compile_to_assembly(LLLnode.from_list(['with', '_val', code.args[0],
                                                         ['sub', ['add', '_val', 31],
                                                                 ['mod', ['sub', '_val', 1], 32]]]), withargs, break_dest, height)
+    # # jump to a symbol
+    elif code.value == 'goto':
+        return [
+            '_sym_' + str(code.args[0]),
+            'JUMP'
+        ]
+    elif isinstance(code.value, str) and code.value.startswith('_sym_'):
+        return code.value
+    # set a symbol as a location.
+    elif code.value == 'label':
+        return [
+            '_sym_' + str(code.args[0]),
+            'JUMPDEST'
+        ]
+    # inject debug opcode.
+    elif code.value == 'debugger':
+        return ['PUSH1', code.pos[0], 'DEBUG']
     else:
         raise Exception("Weird code element: " + repr(code))
 

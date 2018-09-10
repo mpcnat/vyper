@@ -1,7 +1,7 @@
 import ast
 
 from vyper.parser.parser_utils import (
-    get_original_if_0x_prefixed,
+    get_original_if_0_prefixed,
 )
 from vyper.exceptions import (
     TypeMismatchException,
@@ -19,6 +19,9 @@ from vyper.types import (
 from vyper.parser.expr import (
     Expr,
 )
+from vyper.utils import (
+    SizeLimits
+)
 
 
 class Optional(object):
@@ -35,10 +38,10 @@ def process_arg(index, arg, expected_arg_typelist, function_name, context):
     vsub = None
     for expected_arg in expected_arg_typelist:
         if expected_arg == 'num_literal':
-            if isinstance(arg, ast.Num) and get_original_if_0x_prefixed(arg, context) is None:
+            if isinstance(arg, ast.Num) and get_original_if_0_prefixed(arg, context) is None:
                 return arg.n
         elif expected_arg == 'str_literal':
-            if isinstance(arg, ast.Str) and get_original_if_0x_prefixed(arg, context) is None:
+            if isinstance(arg, ast.Str) and get_original_if_0_prefixed(arg, context) is None:
                 bytez = b''
                 for c in arg.s:
                     if ord(c) >= 256:
@@ -48,6 +51,8 @@ def process_arg(index, arg, expected_arg_typelist, function_name, context):
         elif expected_arg == 'name_literal':
             if isinstance(arg, ast.Name):
                 return arg.id
+            elif isinstance(arg, ast.Subscript) and arg.value.id == 'bytes':
+                return 'bytes[%s]' % arg.slice.value.n
         elif expected_arg == '*':
             return arg
         elif expected_arg == 'bytes':
@@ -60,6 +65,9 @@ def process_arg(index, arg, expected_arg_typelist, function_name, context):
             if isinstance(parsed_expected_type, BaseType):
                 vsub = vsub or Expr.parse_value_expr(arg, context)
                 if is_base_type(vsub.typ, expected_arg):
+                    return vsub
+                elif expected_arg in ('int128', 'uint256') and isinstance(vsub.typ, BaseType) and \
+                     vsub.typ.is_literal and SizeLimits.in_bounds(expected_arg, vsub.value):
                     return vsub
             else:
                 vsub = vsub or Expr(arg, context).lll_node

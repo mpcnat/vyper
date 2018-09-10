@@ -6,12 +6,15 @@ from vyper.exceptions import (
     StructureException,
     TypeMismatchException,
     VariableDeclarationException,
+    EventDeclarationException,
+    InvalidLiteralException
 )
 from vyper.functions import (
     stmt_dispatch_table,
+    dispatch_table
 )
-from .parser_utils import LLLnode
-from .parser_utils import (
+from vyper.parser.parser_utils import LLLnode
+from vyper.parser.parser_utils import (
     getpos,
     make_byte_array_copier,
     base_type_conversion,
@@ -29,13 +32,20 @@ from vyper.types import (
     get_size_of_type,
     is_base_type,
     parse_type,
+    NodeType
 )
 from vyper.types import (
     are_units_compatible,
 )
-from .expr import (
+from vyper.utils import (
+    SizeLimits,
+    sha3,
+    fourbytes_to_int
+)
+from vyper.parser.expr import (
     Expr
 )
+from vyper.signatures.function_signature import FunctionSignature
 
 
 class Stmt(object):
@@ -56,13 +66,13 @@ class Stmt(object):
             ast.Break: self.parse_break,
             ast.Continue: self.parse_continue,
             ast.Return: self.parse_return,
-            ast.Delete: self.parse_delete
+            ast.Delete: self.parse_delete,
+            ast.Str: self.parse_docblock,  # docblock
+            ast.Name: self.parse_name,
         }
         stmt_type = self.stmt.__class__
         if stmt_type in self.stmt_table:
             self.lll_node = self.stmt_table[stmt_type]()
-        elif isinstance(stmt, ast.Name) and stmt.id == "throw":
-            self.lll_node = LLLnode.from_list(['assert', 0], typ=None, pos=getpos(stmt))
         else:
             raise StructureException("Unsupported statement type: %s" % type(stmt), stmt)
 
@@ -72,9 +82,17 @@ class Stmt(object):
     def parse_pass(self):
         return LLLnode.from_list('pass', typ=None, pos=getpos(self.stmt))
 
+    def parse_name(self):
+        if self.stmt.id == "vdb":
+            return LLLnode('debugger', typ=None, pos=getpos(self.stmt))
+        elif self.stmt.id == "throw":
+            return LLLnode.from_list(['assert', 0], typ=None, pos=getpos(self.stmt))
+        else:
+            raise StructureException("Unsupported statement type: %s" % type(self.stmt), self.stmt)
+
     def _check_valid_assign(self, sub):
         if isinstance(self.stmt.annotation, ast.Call):  # unit style: num(wei)
-            if self.stmt.annotation.func.id != sub.typ.typ:
+            if self.stmt.annotation.func.id != sub.typ.typ and not sub.typ.is_literal:
                 raise TypeMismatchException('Invalid type, expected: %s' % self.stmt.annotation.func.id, self.stmt)
         elif isinstance(self.stmt.annotation, ast.Dict):
             if not isinstance(sub.typ, StructType):
@@ -82,6 +100,10 @@ class Stmt(object):
         elif isinstance(self.stmt.annotation, ast.Subscript):
             if not isinstance(sub.typ, (ListType, ByteArrayType)):  # check list assign.
                 raise TypeMismatchException('Invalid type, expected: %s' % self.stmt.annotation.value.id, self.stmt)
+        # Check that the integer literal, can be assigned to uint256 if necessary.
+        elif (self.stmt.annotation.id, sub.typ.typ) == ('uint256', 'int128') and sub.typ.is_literal:
+            if not SizeLimits.in_bounds('uint256', sub.value):
+                raise InvalidLiteralException('Invalid uint256 assignment, value not in uint256 range.', self.stmt)
         elif self.stmt.annotation.id != sub.typ.typ and not sub.typ.unit:
             raise TypeMismatchException('Invalid type, expected: %s' % self.stmt.annotation.id, self.stmt)
 
@@ -90,7 +112,7 @@ class Stmt(object):
             make_setter,
         )
         self.context.set_in_assignment(True)
-        typ = parse_type(self.stmt.annotation, location='memory')
+        typ = parse_type(self.stmt.annotation, location='memory', custom_units=self.context.custom_units)
         if isinstance(self.stmt.target, ast.Attribute) and self.stmt.target.value.id == 'self':
             raise TypeMismatchException('May not redefine storage variables.', self.stmt)
         varname = self.stmt.target.id
@@ -121,6 +143,8 @@ class Stmt(object):
         # All other assignments are forbidden.
         elif isinstance(self.stmt.targets[0], ast.Name) and self.stmt.targets[0].id not in self.context.vars:
             raise VariableDeclarationException("Variable type not defined", self.stmt)
+        elif isinstance(self.stmt.targets[0], ast.Tuple) and isinstance(self.stmt.value, ast.Tuple):
+            raise VariableDeclarationException("Tuple to tuple assignment not supported", self.stmt)
         else:
             # Checks to see if assignment is valid
             target = self.get_target(self.stmt.targets[0])
@@ -157,44 +181,48 @@ class Stmt(object):
             pack_logging_topics,
             external_contract_call,
         )
-        if isinstance(self.stmt.func, ast.Name) and self.stmt.func.id in stmt_dispatch_table:
+        if isinstance(self.stmt.func, ast.Name):
+            if self.stmt.func.id in stmt_dispatch_table:
                 return stmt_dispatch_table[self.stmt.func.id](self.stmt, self.context)
+            elif self.stmt.func.id in dispatch_table:
+                raise StructureException("Function {} can not be called without being used.".format(self.stmt.func.id), self.stmt)
+            else:
+                raise StructureException("Unknown function: '{}'.".format(self.stmt.func.id), self.stmt)
         elif isinstance(self.stmt.func, ast.Attribute) and isinstance(self.stmt.func.value, ast.Name) and self.stmt.func.value.id == "self":
             method_name = self.stmt.func.attr
-            if method_name not in self.context.sigs['self']:
-                raise VariableDeclarationException("Function not declared yet (reminder: functions cannot "
-                                                    "call functions later in code than themselves): %s" % self.stmt.func.attr)
-            sig = self.context.sigs['self'][method_name]
+            expr_args = [Expr(arg, self.context).lll_node for arg in self.stmt.args]
+            # full_sig = FunctionSignature.get_full_sig(method_name, expr_args, self.context.sigs, self.context.custom_units)
+            sig = FunctionSignature.lookup_sig(self.context.sigs, method_name, expr_args, self.stmt, self.context)
             if self.context.is_constant and not sig.const:
                 raise ConstancyViolationException(
-                    "May not call non-constant function '%s' within a constant function." % (method_name)
+                    "May not call non-constant function '%s' within a constant function." % (sig.sig)
                 )
-            add_gas = self.context.sigs['self'][method_name].gas
+            add_gas = self.context.sigs['self'][sig.sig].gas
             inargs, inargsize = pack_arguments(sig,
-                                                [Expr(arg, self.context).lll_node for arg in self.stmt.args],
+                                                expr_args,
                                                 self.context, pos=getpos(self.stmt))
             return LLLnode.from_list(['assert', ['call', ['gas'], ['address'], 0, inargs, inargsize, 0, 0]],
-                                        typ=None, pos=getpos(self.stmt), add_gas_estimate=add_gas, annotation='Internal Call: %s' % method_name)
+                                        typ=None, pos=getpos(self.stmt), add_gas_estimate=add_gas, annotation='Internal Call: %s' % sig.sig)
         elif isinstance(self.stmt.func, ast.Attribute) and isinstance(self.stmt.func.value, ast.Call):
             contract_name = self.stmt.func.value.func.id
             contract_address = Expr.parse_value_expr(self.stmt.func.value.args[0], self.context)
-            return external_contract_call(self.stmt, self.context, contract_name, contract_address, True, pos=getpos(self.stmt))
+            return external_contract_call(self.stmt, self.context, contract_name, contract_address, pos=getpos(self.stmt))
         elif isinstance(self.stmt.func.value, ast.Attribute) and self.stmt.func.value.attr in self.context.sigs:
             contract_name = self.stmt.func.value.attr
             var = self.context.globals[self.stmt.func.value.attr]
             contract_address = unwrap_location(LLLnode.from_list(var.pos, typ=var.typ, location='storage', pos=getpos(self.stmt), annotation='self.' + self.stmt.func.value.attr))
-            return external_contract_call(self.stmt, self.context, contract_name, contract_address, True, pos=getpos(self.stmt))
+            return external_contract_call(self.stmt, self.context, contract_name, contract_address, pos=getpos(self.stmt))
         elif isinstance(self.stmt.func.value, ast.Attribute) and self.stmt.func.value.attr in self.context.globals:
             contract_name = self.context.globals[self.stmt.func.value.attr].typ.unit
             var = self.context.globals[self.stmt.func.value.attr]
             contract_address = unwrap_location(LLLnode.from_list(var.pos, typ=var.typ, location='storage', pos=getpos(self.stmt), annotation='self.' + self.stmt.func.value.attr))
-            return external_contract_call(self.stmt, self.context, contract_name, contract_address, var.modifiable, pos=getpos(self.stmt))
+            return external_contract_call(self.stmt, self.context, contract_name, contract_address, pos=getpos(self.stmt))
         elif isinstance(self.stmt.func, ast.Attribute) and self.stmt.func.value.id == 'log':
             if self.stmt.func.attr not in self.context.sigs['self']:
-                raise VariableDeclarationException("Event not declared yet: %s" % self.stmt.func.attr)
+                raise EventDeclarationException("Event not declared yet: %s" % self.stmt.func.attr)
             event = self.context.sigs['self'][self.stmt.func.attr]
             if len(event.indexed_list) != len(self.stmt.args):
-                raise VariableDeclarationException("%s received %s arguments but expected %s" % (event.name, len(self.stmt.args), len(event.indexed_list)))
+                raise EventDeclarationException("%s received %s arguments but expected %s" % (event.name, len(self.stmt.args), len(event.indexed_list)))
             expected_topics, topics = [], []
             expected_data, data = [], []
             for pos, is_indexed in enumerate(event.indexed_list):
@@ -218,7 +246,24 @@ class Stmt(object):
             raise StructureException("Unsupported operator: %r" % ast.dump(self.stmt), self.stmt)
 
     def parse_assert(self):
-        return LLLnode.from_list(['assert', Expr.parse_value_expr(self.stmt.test, self.context)], typ=None, pos=getpos(self.stmt))
+        if self.stmt.msg:
+            if len(self.stmt.msg.s.strip()) == 0:
+                raise StructureException('Empty reason string not allowed.', self.stmt)
+            reason_str = self.stmt.msg.s.strip()
+            sig_placeholder = self.context.new_placeholder(BaseType(32))
+            arg_placeholder = self.context.new_placeholder(BaseType(32))
+            reason_str_type = ByteArrayType(len(reason_str))
+            placeholder_bytes = Expr(self.stmt.msg, self.context).lll_node
+            method_id = fourbytes_to_int(sha3(b"Error(string)")[:4])
+            assert_reason = \
+                ['seq',
+                    ['mstore', sig_placeholder, method_id],
+                    ['mstore', arg_placeholder, 32],
+                    placeholder_bytes,
+                    ['assert_reason', Expr.parse_value_expr(self.stmt.test, self.context), int(sig_placeholder + 28), int(4 + 32 + get_size_of_type(reason_str_type) * 32)]]
+            return LLLnode.from_list(assert_reason, typ=None, pos=getpos(self.stmt))
+        else:
+            return LLLnode.from_list(['assert', Expr.parse_value_expr(self.stmt.test, self.context)], typ=None, pos=getpos(self.stmt))
 
     def parse_for(self):
         from .parser import (
@@ -391,6 +436,12 @@ class Stmt(object):
             sub = unwrap_location(sub)
             if not are_units_compatible(sub.typ, self.context.return_type):
                 raise TypeMismatchException("Return type units mismatch %r %r" % (sub.typ, self.context.return_type), self.stmt.value)
+            elif sub.typ.is_literal and (self.context.return_type.typ == sub.typ or
+                    'int' in self.context.return_type.typ and
+                    'int' in sub.typ.typ):
+                if not SizeLimits.in_bounds(self.context.return_type.typ, sub.value):
+                    raise InvalidLiteralException("Number out of range: " + str(sub.value), self.stmt)
+                return LLLnode.from_list(['seq', ['mstore', 0, sub], ['return', 0, 32]], typ=None, pos=getpos(self.stmt))
             elif is_base_type(sub.typ, self.context.return_type.typ) or \
                     (is_base_type(sub.typ, 'int128') and is_base_type(self.context.return_type, 'int256')):
                 return LLLnode.from_list(['seq', ['mstore', 0, sub], ['return', 0, 32]], typ=None, pos=getpos(self.stmt))
@@ -403,23 +454,42 @@ class Stmt(object):
             if sub.typ.maxlen > self.context.return_type.maxlen:
                 raise TypeMismatchException("Cannot cast from greater max-length %d to shorter max-length %d" %
                                             (sub.typ.maxlen, self.context.return_type.maxlen), self.stmt.value)
+
+            zero_padder = LLLnode.from_list(['pass'])
+            if sub.typ.maxlen > 0:
+                zero_pad_i = self.context.new_placeholder(BaseType('uint256'))  # Iterator used to zero pad memory.
+                zero_padder = LLLnode.from_list(
+                    ['repeat', zero_pad_i, ['mload', '_loc'], sub.typ.maxlen,
+                        ['seq',
+                            ['if', ['gt', ['mload', zero_pad_i], sub.typ.maxlen], 'break'],  # stay within allocated bounds
+                            ['mstore8', ['add', ['add', 32, '_loc'], ['mload', zero_pad_i]], 0]]],
+                    annotation="Zero pad"
+                )
+
             # Returning something already in memory
             if sub.location == 'memory':
-                return LLLnode.from_list(['with', '_loc', sub,
-                                            ['seq',
-                                                ['mstore', ['sub', '_loc', 32], 32],
-                                                ['return', ['sub', '_loc', 32], ['ceil32', ['add', ['mload', '_loc'], 64]]]]], typ=None, pos=getpos(self.stmt))
+                return LLLnode.from_list(
+                    ['with', '_loc', sub,
+                        ['seq',
+                            ['mstore', ['sub', '_loc', 32], 32],
+                            zero_padder,
+                            ['return', ['sub', '_loc', 32], ['ceil32', ['add', ['mload', '_loc'], 64]]]]], typ=None, pos=getpos(self.stmt))
+
             # Copying from storage
             elif sub.location == 'storage':
                 # Instantiate a byte array at some index
                 fake_byte_array = LLLnode(self.context.get_next_mem() + 32, typ=sub.typ, location='memory', pos=getpos(self.stmt))
-                o = ['seq',
+                o = [
+                    'with', '_loc', self.context.get_next_mem() + 32,
+                    ['seq',
                         # Copy the data to this byte array
                         make_byte_array_copier(fake_byte_array, sub),
                         # Store the number 32 before it for ABI formatting purposes
                         ['mstore', self.context.get_next_mem(), 32],
+                        zero_padder,
                         # Return it
                         ['return', self.context.get_next_mem(), ['add', ['ceil32', ['mload', self.context.get_next_mem() + 32]], 64]]]
+                ]
                 return LLLnode.from_list(o, typ=None, pos=getpos(self.stmt))
             else:
                 raise Exception("Invalid location: %s" % sub.location)
@@ -446,7 +516,23 @@ class Stmt(object):
         # Returning a tuple.
         elif isinstance(sub.typ, TupleType):
             if len(self.context.return_type.members) != len(sub.typ.members):
-                raise StructureException("Tuple lengths don't match!")
+                raise StructureException("Tuple lengths don't match!", self.stmt)
+            # check return type matches, sub type.
+            for i, ret_x in enumerate(self.context.return_type.members):
+                s_member = sub.typ.members[i]
+                sub_type = s_member if isinstance(s_member, NodeType) else s_member.typ
+                if type(sub_type) is not type(ret_x):
+                    raise StructureException(
+                        "Tuple return type does not match annotated return. {} != {}".format(
+                            type(sub_type), type(ret_x)
+                        ),
+                        self.stmt
+                    )
+            # Is from a call expression.
+            if len(sub.args[0].args) > 0 and sub.args[0].args[0].value == 'call':
+                mem_pos = sub.args[0].args[-1]
+                mem_size = get_size_of_type(sub.typ) * 32
+                return LLLnode.from_list(['return', mem_pos, mem_size], typ=sub.typ)
             subs = []
             dynamic_offset_counter = LLLnode(self.context.get_next_mem(), typ=None, annotation="dynamic_offset_counter")  # dynamic offset position counter.
             new_sub = LLLnode.from_list(self.context.get_next_mem() + 32, typ=self.context.return_type, location='memory', annotation='new_sub')
@@ -525,9 +611,16 @@ class Stmt(object):
 
         if isinstance(target, ast.Name) and target.id in self.context.forvars:
             raise StructureException("Altering iterator '%s' which is in use!" % target.id, self.stmt)
+        if isinstance(target, ast.Tuple):
+            return Expr(target, self.context).lll_node
         target = Expr.parse_variable_location(target, self.context)
         if target.location == 'storage' and self.context.is_constant:
             raise ConstancyViolationException("Cannot modify storage inside a constant function: %s" % target.annotation)
         if not target.mutable:
             raise ConstancyViolationException("Cannot modify function argument: %s" % target.annotation)
         return target
+
+    def parse_docblock(self):
+        if '"""' not in self.context.origcode.splitlines()[self.stmt.lineno - 1]:
+            raise InvalidLiteralException('Only valid """ docblocks allowed', self.stmt)
+        return LLLnode.from_list('pass', typ=None, pos=getpos(self.stmt))

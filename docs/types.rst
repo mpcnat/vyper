@@ -14,7 +14,6 @@ to form complex types.
 In addition, types can interact with each other in expressions containing
 operators.
 
-
 .. index:: ! value
 
 ***********
@@ -35,7 +34,7 @@ A boolean is a type to store a logical/truth value.
 
 Values
 ------
-The only possible values are the constants ``true`` and ``false``.
+The only possible values are the constants ``True`` and ``False``.
 
 Operators
 ---------
@@ -111,7 +110,7 @@ Values
 Integer values between 0 and (2\ :sup:`256`-1).
 
 .. note::
-    Integer literals are always interpreted as ``int128``. In order to assign a literal to a ``uint256`` use ``as_uint256(_literal)``.
+    Integer literals are interpreted as ``int128`` by default. In cases where ``uint256`` is more appropriate, such as assignment, the literal might be interpreted as ``uint256``. Example: ``_variable: uint256 = _literal``. In order to explicitly cast a literal to a ``uint256`` use ``convert(_literal, 'uint256')``.
 
 Operators
 ---------
@@ -211,6 +210,7 @@ Operator       Description
 ``min(x, y)``  Minimum
 ``max(x, y)``  Maximum
 ``floor(x)``   Largest integer <= ``x``. Returns ``int128``.
+``ceil(x)``   Smallest integer >= ``x``. Returns ``int128``.
 =============  ==========================================
 ``x`` and ``y`` must be of the type ``decimal``.
 
@@ -239,30 +239,48 @@ Syntax as follows: ``_address.<member>``, where ``_address`` is of the type ``ad
 
 Unit Types
 ==========
-Vyper allows the definition of types with discrete units e.g. meters, seconds, wei, ... . These types may only be based on either ``int128`` or ``decimal``.
-Vyper has multiple unit types built in, which are the following:
+Vyper allows the definition of types with discrete units e.g. meters, seconds, wei, ... . These types may only be based on either ``uint256``, ``int128`` or ``decimal``.
+Vyper has 3 unit types built in, which are the following:
 
 =============  =====  =========  ==========================
 Time
 -----------------------------------------------------------
 Keyword        Unit   Base type  Description
 =============  =====  =========  ==========================
-``timestamp``  1 sec  ``int128``    This represents a point in time.
-``timedelta``  1 sec  ``int128``    This is a number of seconds.
+``timestamp``  1 sec  ``uint256``    This represents a point in time.
+``timedelta``  1 sec  ``uint256``    This is a number of seconds.
 =============  =====  =========  ==========================
 
 .. note::
     Two ``timedelta`` can be added together, as can a ``timedelta`` and a ``timestamp``, but not two ``timestamps``.
 
 ===================  ===========  =========  ====================================================================================
-Currency
+Wei
 ---------------------------------------------------------------------------------------------------------------------------------
 Keyword              Unit         Base type  Description
 ===================  ===========  =========  ====================================================================================
-``wei_value``        1 wei        ``int128``    This is an amount of `Ether <http://ethdocs.org/en/latest/ether.html#denominations>`_ in wei.
-``currency1_value``  1 currency1  ``int128``    This is an amount of currency1.
-``currency2_value``  1 currency2  ``int128``    This is an amount of currency2.
+``wei_value``        1 wei        ``uint256``    This is an amount of `Ether <http://ethdocs.org/en/latest/ether.html#denominations>`_ in wei.
 ===================  ===========  =========  ====================================================================================
+
+Custom Unit Types
+=================
+
+Vyper allows you to add additional not-provided unit label to either ``uint256``, ``int128`` or ``decimal``.
+
+**Custom units example:**
+::
+    # specify units used in the contract.
+    units: {
+        cm: "centimeter",
+        km: "kilometer"
+    }
+
+Having defined the units they can be defined on variables as follows.
+
+**Custom units usage:**
+::
+    a: int128(cm)
+    b: uint256(km)
 
 .. index:: !bytes32
 32-bit-wide Byte Array
@@ -401,19 +419,55 @@ Here ``_KeyType`` can be almost any type except for mappings, a contract, or a s
 .. note::
     Mappings can only be accessed, not iterated over.
 
+.. index:: !initial
+
+**********
+Builtin Constants
+**********
+
+Vyper has a few convenience constants builtin.
+
+======= ============ ==========================================
+Type    Name         Value
+======= ============ ==========================================
+address ZERO_ADDRESS 0x0000000000000000000000000000000000000000
+int128  MAX_INT128   2**127 - 1
+int128  MIN_INT128   -2**127
+decimal MAX_DECIMAL  (2**127 - 1)
+decimal MIN_DECIMAL  (-2**127)
+uint256 MAX_UINT256  2**256 - 1
+======= ============ ==========================================
+
+**********
+Initial Values and None
+**********
+In Vyper, there is no ``null`` option like most programing languages have. Thus, every variable type has a default value.
+Nevertheless Vyper has the option to declare ``None`` which represent the default value of the type. Note that there is no option to assign ``None`` when initiating a variable. Also, note that you can't make comparisons to None. In order to check if a variable is empty, you will need to compare it to its type's default value.
+
+Here you can find a list of all types and default values:
+
+.. list-table:: Default Variable Values
+   :header-rows: 1
+
+   * - Type
+     - Default Value
+   * - ``bool``
+     - ``False``
+   * - ``int128``
+     - ``0``
+   * - ``uint256``
+     - ``0``
+   * - ``decimal``
+     - ``0.0``
+   * - ``address``
+     - ``0x0000000000000000000000000000000000000000``
+   * - ``bytes32``
+     - ``'\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00'``
+
+.. note::
+    In ``bytes`` the array starts with the bytes all set to ``'\x00'``
+
+.. note::
+    In reference types all the type's members are set to their initial values.
+
 .. index:: !conversion
-
-**********
-Conversion
-**********
-The following conversions are possible.
-
-===========================  =====================================================================================================================  =============
-Keyword                      Input                                                                                                                  Output
-===========================  =====================================================================================================================  =============
-``as_num128(x)``             ``uint256``, ``address``, ``bytes32``                                                                                   ``int128``
-``as_uint256(x)``             ``int128`` , ``address``, ``bytes32``                                                                                     ``uint256``
-``as_bytes32(x)``            ``int128``, ``uint256``, ``address``                                                                                       ``bytes32``
-``bytes_to_num(x)``          ``bytes``                                                                                                              ``int128``
-``as_wei_value(x, denom)``   ``int128`` , ``decimal``; `denomination <http://ethdocs.org/en/latest/ether.html#denominations>`_ literal                 ``wei_value``
-===========================  =====================================================================================================================  =============

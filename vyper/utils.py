@@ -1,8 +1,9 @@
 import binascii
+import re
 
 from collections import OrderedDict
-from . exceptions import InvalidLiteralException
-from .opcodes import opcodes
+from vyper.exceptions import InvalidLiteralException
+from vyper.opcodes import opcodes
 
 try:
     from Crypto.Hash import keccak
@@ -12,7 +13,7 @@ except ImportError:
     sha3 = lambda x: _sha3.sha3_256(x).digest()
 
 
-# Converts for bytes to an integer
+# Converts four bytes to an integer
 def fourbytes_to_int(inp):
     return (inp[0] << 24) + (inp[1] << 16) + (inp[2] << 8) + inp[3]
 
@@ -66,21 +67,26 @@ def calc_mem_gas(memsize):
     return (memsize // 32) * 3 + (memsize // 32) ** 2 // 512
 
 
+# Specific gas usage
+GAS_IDENTITY = 15
+GAS_IDENTITYWORD = 3
+
 # A decimal value can store multiples of 1/DECIMAL_DIVISOR
 DECIMAL_DIVISOR = 10000000000
 
 
 # Number of bytes in memory used for system purposes, not for variables
 class MemoryPositions:
-    RESERVED_MEMORY = 320
     ADDRSIZE = 32
     MAXNUM = 64
     MINNUM = 96
     MAXDECIMAL = 128
     MINDECIMAL = 160
     FREE_VAR_SPACE = 192
-    BLANK_SPACE = 224
-    FREE_LOOP_INDEX = 256
+    FREE_VAR_SPACE2 = 224
+    BLANK_SPACE = 256
+    FREE_LOOP_INDEX = 288
+    RESERVED_MEMORY = 320
 
 
 # Sizes of different data types. Used to clamp types.
@@ -90,6 +96,19 @@ class SizeLimits:
     MINNUM = -2**127
     MAXDECIMAL = (2**127 - 1) * DECIMAL_DIVISOR
     MINDECIMAL = (-2**127) * DECIMAL_DIVISOR
+    MAX_UINT256 = 2**256 - 1
+
+    @classmethod
+    def in_bounds(cls, type_str, value):
+        assert isinstance(type_str, str)
+        if type_str == 'decimal':
+            return float(cls.MINDECIMAL) <= value <= float(cls.MAXDECIMAL)
+        if type_str == 'uint256':
+            return 0 <= value <= cls.MAX_UINT256
+        elif type_str == 'int128':
+            return cls.MINNUM <= value <= cls.MAXNUM
+        else:
+            raise Exception('Unknown type "%s" supplied.' % type_str)
 
 
 # Map representing all limits loaded into a contract as part of the initializer
@@ -111,30 +130,50 @@ RLP_DECODER_ADDRESS = hex_to_int('0x5185D17c44699cecC3133114F8df70753b856709')
 # This is the contract address: 0xCb969cAAad21A78a24083164ffa81604317Ab603
 
 # Available base types
-base_types = ['int128', 'decimal', 'bytes32', 'uint256', 'int256', 'bool', 'address']
+base_types = ['int128', 'decimal', 'bytes32', 'uint256', 'bool', 'address']
 
 # Keywords available for ast.Call type
-valid_call_keywords = ['int128', 'decimal', 'address', 'contract', 'indexed']
+valid_call_keywords = ['uint256', 'int128', 'decimal', 'address', 'contract', 'indexed']
 
 # Valid base units
-valid_units = ['currency', 'wei', 'currency1', 'currency2', 'sec', 'm', 'kg']
+valid_units = ['wei', 'sec']
 
 # Valid attributes for global variables
-valid_global_keywords = ['public', 'modifiable', 'static', 'event'] + valid_units + valid_call_keywords
+valid_global_keywords = ['public', 'modifying', 'event'] + valid_units + valid_call_keywords
 
 # Cannot be used for variable or member naming
-reserved_words = ['int128', 'int256', 'uint256', 'address', 'bytes32',
-                  'real', 'real128x128', 'if', 'for', 'while', 'until',
-                  'pass', 'def', 'push', 'dup', 'swap', 'send', 'call',
-                  'selfdestruct', 'assert', 'stop', 'throw',
-                  'raise', 'init', '_init_', '___init___', '____init____',
-                  'true', 'false', 'self', 'this', 'continue', 'ether',
-                  'wei', 'finney', 'szabo', 'shannon', 'lovelace', 'ada',
-                  'babbage', 'gwei', 'kwei', 'mwei', 'twei', 'pwei', 'contract']
+reserved_words = [
+    'int128', 'uint256', 'address', 'bytes32',
+    'if', 'for', 'while', 'until',
+    'pass', 'def', 'push', 'dup', 'swap', 'send', 'call',
+    'selfdestruct', 'assert', 'stop', 'throw',
+    'raise', 'init', '_init_', '___init___', '____init____',
+    'true', 'false', 'self', 'this', 'continue',
+    'ether', 'wei', 'finney', 'szabo', 'shannon', 'lovelace', 'ada', 'babbage', 'gwei', 'kwei', 'mwei', 'twei', 'pwei', 'contract',
+    'units',
+    'zero_address', 'max_int128', 'min_int128', 'max_decimal', 'min_decimal', 'max_uint256',  # constants
+]
+
+# List of valid LLL macros.
+valid_lll_macros = [
+    'assert', 'break', 'ceil32', 'clamp', 'clamp', 'clamp_nonzero', 'clampge',
+    'clampgt', 'clample', 'clamplt', 'codeload', 'continue', 'debugger', 'ge',
+    'if', 'le', 'lll', 'ne', 'pass', 'repeat', 'seq', 'set', 'sge', 'sha3_32',
+    'sha3_64', 'sle', 'uclampge', 'uclampgt', 'uclample', 'uclamplt', 'with',
+    '~codelen', 'label', 'goto'
+]
 
 
 # Is a variable or member variable name valid?
-def is_varname_valid(varname):
+# Same conditions apply for function names and events
+def is_varname_valid(varname, custom_units):
+    from vyper.functions import dispatch_table, stmt_dispatch_table
+    built_in_functions = [x for x in stmt_dispatch_table.keys()] + \
+      [x for x in dispatch_table.keys()]
+    if custom_units is None:
+        custom_units = []
+    if varname.lower() in [cu.lower() for cu in custom_units]:
+        return False
     if varname.lower() in base_types:
         return False
     if varname.lower() in valid_units:
@@ -142,5 +181,9 @@ def is_varname_valid(varname):
     if varname.lower() in reserved_words:
         return False
     if varname.upper() in opcodes:
+        return False
+    if varname.lower() in built_in_functions:
+        return False
+    if not re.match('^[_a-zA-Z][a-zA-Z0-9_]*$', varname):
         return False
     return True

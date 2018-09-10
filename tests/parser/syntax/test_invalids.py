@@ -2,8 +2,11 @@ import pytest
 from pytest import raises
 
 from vyper import compiler
-from vyper.exceptions import TypeMismatchException
-
+from vyper.exceptions import (
+    TypeMismatchException,
+    StructureException,
+    InvalidLiteralException
+)
 
 # These functions register test cases
 # for pytest functions at the end
@@ -185,8 +188,11 @@ def foo() -> address:
 """, TypeMismatchException)
 
 must_succeed("""
+units: {
+    currency: "currency"
+}
 @public
-def foo(x: wei_value, y: currency_value, z: int128 (wei*currency/sec**2)) -> decimal(sec**2):
+def foo(x: wei_value, y: uint256(currency), z: uint256(wei*currency/sec**2)) -> uint256(sec**2):
     return x * y / z
 """)
 
@@ -236,13 +242,26 @@ def foo():
     return 3
 """, TypeMismatchException)
 
-# We disabled these keywords
-# throws AttributeError in this case
 must_fail("""
 @public
 def foo():
     suicide(msg.sender)
-    """, AttributeError)
+    """, StructureException)
+
+must_succeed('''
+@public
+def sum(a: int128, b: int128) -> int128:
+    """
+    Sum two signed integers.
+    """
+    return a + b
+''')
+
+must_fail('''
+@public
+def a():
+    "Test"
+''', InvalidLiteralException)
 
 
 @pytest.mark.parametrize('bad_code,exception_type', fail_list)

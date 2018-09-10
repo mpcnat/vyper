@@ -59,7 +59,9 @@ def jop() -> int128:
 
     c = get_contract_with_gas_estimation(multi_setter_test)
     assert c.foo() == 321
+    c.foo(transact={})
     assert c.fop() == 654321
+    c.fop(transact={})
     assert c.goo() == 321
     assert c.gop() == 654321
     assert c.hoo() == 0
@@ -133,12 +135,12 @@ pap: decimal[2][2]
 def foo() -> int128:
     self.mom = {a: [{c: 1}, {c: 2}, {c: 3}], b: 4}
     self.non = self.mom
-    return floor(self.non.a[0].c + self.non.a[1].c * 10 + self.non.a[2].c * 100 + self.non.b * 1000)
+    return floor(self.non.a[0].c + self.non.a[1].c * 10.0 + self.non.a[2].c * 100.0 + convert(self.non.b, 'decimal') * 1000.0)
 
 @public
 def goo() -> int128:
     self.pap = [[1, 2], [3, 4]]
-    return floor(self.pap[0][0] + self.pap[0][1] * 10 + self.pap[1][0] * 100 + self.pap[1][1] * 1000)
+    return floor(self.pap[0][0] + self.pap[0][1] * 10.0 + self.pap[1][0] * 100.0 + self.pap[1][1] * 1000.0)
     """
 
     c = get_contract_with_gas_estimation(type_converter_setter_test)

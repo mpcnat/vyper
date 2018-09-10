@@ -52,11 +52,12 @@ class NodeType():
 # Data structure for a type that represents a 32-byte object
 class BaseType(NodeType):
 
-    def __init__(self, typ, unit=False, positional=False, override_signature=False):
+    def __init__(self, typ, unit=False, positional=False, override_signature=False, is_literal=False):
         self.typ = typ
         self.unit = {} if unit is False else unit
         self.positional = positional
         self.override_signature = override_signature
+        self.is_literal = is_literal
 
     def __eq__(self, other):
         return other.__class__ == BaseType and self.typ == other.typ and self.unit == other.unit and self.positional == other.positional
@@ -68,6 +69,12 @@ class BaseType(NodeType):
         if self.positional:
             subs.append('positional')
         return str(self.typ) + (('(' + ', '.join(subs) + ')') if subs else '')
+
+
+class ContractType(BaseType):
+
+    def __init__(self, name):
+        super().__init__('address', name)
 
 
 # Data structure for a byte array
@@ -158,43 +165,33 @@ def canonicalize_type(t, is_indexed=False):
         )
     if not isinstance(t, BaseType):
         raise Exception("Cannot canonicalize non-base type: %r" % t)
-    uint256_override = True if t.override_signature == 'uint256' else False
 
     t = t.typ
-    if t == 'int128' and not uint256_override:
+    if t == 'int128':
         return 'int128'
-    elif t == 'int128' and uint256_override:
-        return 'uint256'
     elif t == 'decimal':
-        return 'decimal10'
+        return 'fixed168x10'
     elif t == 'bool':
         return 'bool'
     elif t == 'uint256':
         return 'uint256'
-    elif t == 'int256':
-        return 'int256'
     elif t == 'address' or t == 'bytes32':
         return t
-    elif t == 'real':
-        return 'real128x128'
     raise Exception("Invalid or unsupported type: " + repr(t))
 
 
 # Special types
 special_types = {
-    'timestamp': BaseType('int128', {'sec': 1}, True),
-    'timedelta': BaseType('int128', {'sec': 1}, False),
-    'currency_value': BaseType('int128', {'currency': 1}, False),
-    'currency1_value': BaseType('int128', {'currency1': 1}, False),
-    'currency2_value': BaseType('int128', {'currency2': 1}, False),
-    'wei_value': BaseType('int128', {'wei': 1}, False),
+    'timestamp': BaseType('uint256', {'sec': 1}, True),
+    'timedelta': BaseType('uint256', {'sec': 1}, False),
+    'wei_value': BaseType('uint256', {'wei': 1}, False),
 }
 
 
 # Parse an expression representing a unit
-def parse_unit(item):
+def parse_unit(item, custom_units):
     if isinstance(item, ast.Name):
-        if item.id not in valid_units:
+        if item.id not in valid_units + custom_units:
             raise InvalidTypeException("Invalid base unit", item)
         return {item.id: 1}
     elif isinstance(item, ast.Num) and item.n == 1:
@@ -202,10 +199,10 @@ def parse_unit(item):
     elif not isinstance(item, ast.BinOp):
         raise InvalidTypeException("Invalid unit expression", item)
     elif isinstance(item.op, ast.Mult):
-        left, right = parse_unit(item.left), parse_unit(item.right)
+        left, right = parse_unit(item.left, custom_units), parse_unit(item.right, custom_units)
         return combine_units(left, right)
     elif isinstance(item.op, ast.Div):
-        left, right = parse_unit(item.left), parse_unit(item.right)
+        left, right = parse_unit(item.left, custom_units), parse_unit(item.right, custom_units)
         return combine_units(left, right, div=True)
     elif isinstance(item.op, ast.Pow):
         if not isinstance(item.left, ast.Name):
@@ -219,7 +216,10 @@ def parse_unit(item):
 
 # Parses an expression representing a type. Annotation refers to whether
 # the type is to be located in memory or storage
-def parse_type(item, location, sigs={}):
+def parse_type(item, location, sigs=None, custom_units=None):
+    custom_units = custom_units or []
+    sigs = sigs or {}
+
     # Base types, e.g. num
     if isinstance(item, ast.Name):
         if item.id in base_types:
@@ -227,21 +227,18 @@ def parse_type(item, location, sigs={}):
         elif item.id in special_types:
             return special_types[item.id]
         else:
-            # import ipdb; ipdb.set_trace()
             raise InvalidTypeException("Invalid base type: " + item.id, item)
     # Units, e.g. num (1/sec) or contracts
     elif isinstance(item, ast.Call):
         # Contract_types
-        if item.func.id == 'contract' or item.func.id == 'address':
+        if item.func.id == 'address':
             if sigs and item.args[0].id in sigs:
-                return BaseType('address', item.args[0].id)
-            else:
-                raise InvalidTypeException('Invalid contract declaration')
+                return ContractType(item.args[0].id)
         if not isinstance(item.func, ast.Name):
             raise InvalidTypeException("Malformed unit type:", item)
         base_type = item.func.id
-        if base_type not in ('int128', 'decimal'):
-            raise InvalidTypeException("You must use int128, decimal, address, contract, \
+        if base_type not in ('int128', 'uint256', 'decimal'):
+            raise InvalidTypeException("You must use int128, uint256, decimal, address, contract, \
                 for variable declarations and indexed for logging topics ", item)
         if len(item.args) == 0:
             raise InvalidTypeException("Malformed unit type", item)
@@ -253,10 +250,7 @@ def parse_type(item, location, sigs={}):
             argz = item.args
         if len(argz) != 1:
             raise InvalidTypeException("Malformed unit type", item)
-        # Check for uint256 to num casting
-        if item.func.id == 'int128' and getattr(item.args[0], 'id', '') == 'uint256':
-            return BaseType('int128', override_signature='uint256')
-        unit = parse_unit(argz[0])
+        unit = parse_unit(argz[0], custom_units=custom_units)
         return BaseType(base_type, unit, positional)
     # Subscripts
     elif isinstance(item, ast.Subscript):
@@ -271,7 +265,7 @@ def parse_type(item, location, sigs={}):
                 return ByteArrayType(item.slice.value.n)
             # List
             else:
-                return ListType(parse_type(item.value, location), item.slice.value.n)
+                return ListType(parse_type(item.value, location, custom_units=custom_units), item.slice.value.n)
         # Mappings, e.g. num[address]
         else:
             if location == 'memory':
@@ -279,17 +273,17 @@ def parse_type(item, location, sigs={}):
             keytype = parse_type(item.slice.value, None)
             if not isinstance(keytype, (BaseType, ByteArrayType)):
                 raise InvalidTypeException("Mapping keys must be base or bytes types", item.slice.value)
-            return MappingType(keytype, parse_type(item.value, location))
+            return MappingType(keytype, parse_type(item.value, location, custom_units=custom_units))
     # Dicts, used to represent mappings, e.g. {uint: uint}. Key must be a base type
     elif isinstance(item, ast.Dict):
         o = {}
         for key, value in zip(item.keys, item.values):
-            if not isinstance(key, ast.Name) or not is_varname_valid(key.id):
+            if not isinstance(key, ast.Name) or not is_varname_valid(key.id, custom_units):
                 raise InvalidTypeException("Invalid member variable for struct", key)
-            o[key.id] = parse_type(value, location)
+            o[key.id] = parse_type(value, location, custom_units=custom_units)
         return StructType(o)
     elif isinstance(item, ast.Tuple):
-        members = [parse_type(x, location) for x in item.elts]
+        members = [parse_type(x, location, custom_units=custom_units) for x in item.elts]
         return TupleType(members)
     else:
         raise InvalidTypeException("Invalid type: %r" % ast.dump(item), item)
@@ -332,7 +326,7 @@ def are_units_compatible(frm, to):
 
 # Is a type representing a number?
 def is_numeric_type(typ):
-    return isinstance(typ, BaseType) and typ.typ in ('int128', 'decimal')
+    return isinstance(typ, BaseType) and typ.typ in ('int128', 'uint256', 'decimal')
 
 
 # Is a type representing some particular base type?

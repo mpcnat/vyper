@@ -1,17 +1,7 @@
-This is the suggested template for new VIPs.
-
-## Preamble
-
-    VIP: <to be assigned>
-    Title: <VIP title>
-    Author: <list of authors' names and optionally, email addresses>
-    Type: <Standard Track | Informational | Meta>
-    Status: Draft
-    Created: <date created on, in ISO 8601 (yyyy-mm-dd) format>
-    Requires (*optional): <VIP number(s)>
-    Replaces (*optional): <VIP number(s)>
-
-
+---
+name: Vyper Improvement Proposal (VIP)
+about: This is the suggested template for new VIPs.
+---
 ## Simple Summary
 "If you can't explain it simply, you don't understand it well enough." Provide a simplified and layman-accessible explanation of the VIP.
 
@@ -19,7 +9,7 @@ This is the suggested template for new VIPs.
 A short description of the technical issue being addressed.
 
 ## Motivation
-The motivation is critical for VIPs that add or change Vyper's functionality. It should clearly explain why the existing Vyper functionality is inadequate to address the problem that the VIP solves as well as how the VIP is in line with Vyper's goals and design philosopy.
+The motivation is critical for VIPs that add or change Vyper's functionality. It should clearly explain why the existing Vyper functionality is inadequate to address the problem that the VIP solves as well as how the VIP is in line with Vyper's goals and design philosophy.
 
 ## Specification
 The technical specification should describe the syntax and semantics of any new feature. The specification should be detailed enough to allow any developer to implement the functionality

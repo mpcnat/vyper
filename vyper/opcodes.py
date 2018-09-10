@@ -47,7 +47,7 @@ opcodes = {
     'MSTORE': [0x52, 2, 0, 3],
     'MSTORE8': [0x53, 2, 0, 3],
     'SLOAD': [0x54, 1, 1, 200],
-    'SSTORE': [0x55, 2, 0, 5000],
+    'SSTORE': [0x55, 2, 0, 20000],
     'JUMP': [0x56, 1, 0, 8],
     'JUMPI': [0x57, 2, 0, 10],
     'PC': [0x58, 0, 1, 2],
@@ -69,6 +69,7 @@ opcodes = {
     'STATICCALL': [0xfa, 6, 1, 40],
     'REVERT': [0xfd, 2, 0, 0],
     'INVALID': [0xfe, 0, 0, 0],
+    'DEBUG': [0xa5, 1, 0, 0]
 }
 
 pseudo_opcodes = {
@@ -77,10 +78,12 @@ pseudo_opcodes = {
     'UCLAMPLE': [None, 2, 1, 30],
     'CLAMP_NONZERO': [None, 1, 1, 19],
     'ASSERT': [None, 1, 0, 85],
+    'ASSERT_REASON': [None, 3, 0, 85],
     'PASS': [None, 0, 0, 0],
     'BREAK': [None, 0, 0, 20],
     'CONTINUE': [None, 0, 0, 20],
     'SHA3_32': [None, 1, 1, 72],
+    'SHA3_64': [None, 2, 1, 109],
     'SLE': [None, 2, 1, 10],
     'SGE': [None, 2, 1, 10],
     'LE': [None, 2, 1, 10],
@@ -88,6 +91,9 @@ pseudo_opcodes = {
     'CEIL32': [None, 1, 1, 20],
     'SET': [None, 2, 0, 20],
     'NE': [None, 2, 1, 6],
+    'DEBUGGER': [None, 0, 0, 0],
+    'LABEL': [None, 1, 0, 1],
+    'GOTO': [None, 1, 0, 8]
 }
 
 comb_opcodes = {}
